@@ -193,11 +193,17 @@ def main():
     model_state_dict, train_args, modality_configs, modality_names, best_val_auc = load_checkpoint(
         args.checkpoint_path, device)
     
-    modality_dim_dict = {'labs_vitals': 30, 'cxr': 1024, 'notes': 768}
+    modality_dim_dict = {'labs_vitals': 30, 'notes': 768}
     # Load test data
     print(f"Loading test data from {args.test_data_path}...")
     test_stays = pickle.load(open(args.test_data_path, 'rb'))
     test_multimodal_reg_ts, test_labels = preprocess_mimiciv_data(test_stays, modality_dim_dict)
+
+    # Derive modality feature dims from the actual data (reg_ts is 31-dim) so the
+    # dataset matches the checkpoint's encoder dims instead of a stale hardcoded value.
+    for mod_name in modality_dim_dict:
+        modality_dim_dict[mod_name] = test_multimodal_reg_ts[0][mod_name][0].shape[1]
+    print(f"Modality dims (from data): {modality_dim_dict}")
     
     # Load RUS data
     print(f"Loading RUS data from {args.rus_data_path}...")

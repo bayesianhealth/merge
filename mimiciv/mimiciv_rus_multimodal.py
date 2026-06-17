@@ -144,8 +144,7 @@ def preprocess_mimiciv_data(stays: List[Dict], modality_dim_dict: Dict[str, int]
     for i, stay in enumerate(selected_stays):
         
         multimodal_irg_ts = {
-            'notes': [(stay['text_time'][j], stay['text_embeddings'][j]) for j in range(len(stay['text_time']))],
-            'cxr': [(stay['cxr_time'][j], stay['cxr_feats'][j]) for j in range(len(stay['cxr_time']))]
+            'notes': [(stay['text_time'][j], stay['text_embeddings'][j]) for j in range(len(stay['text_time']))]
         }
         
         multimodal_reg_ts = align_multimodal_irg_ts(stay['reg_ts'], multimodal_irg_ts, modality_dim_dict, linear_interpolation=linear_interpolation)
@@ -171,7 +170,6 @@ def main(args):
     train_stays = pickle.load(open(args.train_dataset_path, 'rb'))
     
     modality_dim_dict = {'labs_vitals': 30,
-                         'cxr': 1024,
                          'notes': 768}
     all_multimodal_reg_ts, all_labels = preprocess_mimiciv_data(train_stays, modality_dim_dict, args.num_subsample_stays, args.linear_interpolation)    
     

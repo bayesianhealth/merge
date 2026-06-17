@@ -23,7 +23,7 @@ def parse_subject_list(s):
 
 def parse_args():
     parser = argparse.ArgumentParser(description='PAMAP2 dataset multimodal RUS analysis with PID')
-    parser.add_argument('--dataset_dir', type=str, default="/cis/home/xhan56/pamap/PAMAP2_Dataset/Protocol",
+    parser.add_argument('--dataset_dir', type=str, default='@"TEST"."SILVER"."UDTF_FEATURE_STAGE"/Protocol',
                         help='Directory containing PAMAP2 dataset files')
     parser.add_argument('--output_dir', type=str, default="./results/pamap",
                         help='Directory to save analysis results')
@@ -105,8 +105,25 @@ def get_pamap_column_names():
     return columns
 
 def load_pamap_data(subject_id, data_dir):
-    """Loads data for a specific subject from the PAMAP2 dataset."""
-    file_path = os.path.join(data_dir, f"subject10{subject_id}.dat")
+    """Loads data for a specific subject from the PAMAP2 dataset.
+
+    Supports both a local filesystem directory and a Snowflake stage path
+    (e.g. '@"DB"."SCHEMA"."STAGE"/Protocol'). Stage paths are read through the
+    active Snowpark session since they are not OS filesystem paths.
+    """
+    from pamap_rus import _get_snowpark_session
+    file_name = f"subject10{subject_id}.dat"
+
+    if str(data_dir).lstrip().startswith('@'):
+        stage_path = f"{str(data_dir).rstrip('/')}/{file_name}"
+        print(f"Loading data for subject {subject_id} from stage {stage_path}...")
+        session = _get_snowpark_session()
+        with session.file.get_stream(stage_path) as f:
+            df = pd.read_csv(f, sep='\s+', header=None, names=get_pamap_column_names())
+        print(f"Loaded data shape: {df.shape}")
+        return df
+
+    file_path = os.path.join(data_dir, file_name)
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"Data file not found for subject {subject_id} at {file_path}")
 
@@ -519,12 +536,15 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     # Set up GPU device
-    if torch.cuda.is_available():
+    if torch.cuda.is_available() and args.gpu < torch.cuda.device_count():
         device = torch.device(f'cuda:{args.gpu}')
         print(f"Using GPU: {device}")
     else:
         device = torch.device('cpu')
-        print("CUDA not available. Using CPU.")
+        if torch.cuda.is_available():
+            print(f"GPU {args.gpu} not available (found {torch.cuda.device_count()} device(s)). Using CPU.")
+        else:
+            print("CUDA not available. Using CPU.")
 
     # Set random seed for reproducibility (done once; per-subject reseed below for parity)
     torch.manual_seed(args.seed)

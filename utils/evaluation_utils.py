@@ -46,7 +46,7 @@ def print_evaluation_results(results: Dict, dataset_name: str, class_names: List
     # Confusion matrix
     print(f"\nConfusion Matrix:")
     cm = results['confusion_matrix']
-    print(f"{'Actual \\ Predicted':<20}", end="")
+    print("{:<20}".format('Actual \\ Predicted'), end="")
     for i, class_name in enumerate(class_names):
         if i < cm.shape[1]:
             print(f"{class_name:<10}", end="")

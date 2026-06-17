@@ -356,7 +356,7 @@ def temporal_pid_batch(X1, X2, Y, lag=1, batch_size=256, n_batches=10,
         
     # Set device
     if device is None:
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        device = torch.device('cuda' if torch.cuda.is_available() and torch.cuda.device_count() > 0 else 'cpu')
 
     # Set random seed
     torch.manual_seed(seed)
@@ -520,7 +520,7 @@ def temporal_pid_multiscale_batch(X1, X2, Y, max_lag=5, batch_size=256,
         raise RuntimeError("Multi-scale batch estimator unavailable.")
 
     if device is None:
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        device = torch.device('cuda' if torch.cuda.is_available() and torch.cuda.device_count() > 0 else 'cpu')
 
     torch.manual_seed(seed)
     np.random.seed(seed)

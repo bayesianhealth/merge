@@ -2,6 +2,7 @@ import os
 import argparse
 import pandas as pd
 from tqdm import tqdm
+import pipeline_utils as pu
 
 def impute_time_series(df):
     interval_length = 1
@@ -45,6 +46,11 @@ def impute_time_series(df):
     return imputed_df
 
 def main(args):
+    out_path = os.path.join(args.output_dir, "imputed_ts_labs_vitals.parquet")
+    if not args.force and pu.is_done(args.output_dir, pu.STEP2_IMPUTED):
+        print("Step 2 already complete (marker present); skipping. Use --force to redo.")
+        return
+
     labs_vitals_ts_df = pd.read_parquet(os.path.join(args.output_dir, "ts_labs_vitals.parquet"))
     labs_vitals_ts_df.drop(columns=['hosp_time_delta'], inplace=True)
     # labs_vitals_ts_df.rename(columns={'icu_time_delta': 'timedelta'}, inplace=True)
@@ -53,12 +59,15 @@ def main(args):
     labs_vitals_ts_df = impute_time_series(labs_vitals_ts_df)
 
     print('Saving imputed time series...')
-    labs_vitals_ts_df.to_parquet(os.path.join(args.output_dir, "imputed_ts_labs_vitals.parquet"))
+    pu.atomic_to_parquet(labs_vitals_ts_df, out_path)
+    pu.write_marker(args.output_dir, pu.STEP2_IMPUTED,
+                    {"rows": int(len(labs_vitals_ts_df)), "output": "imputed_ts_labs_vitals.parquet"})
 
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--output_dir", type=str, help='Path to output directory', default='data')
+    parser.add_argument("--force", action='store_true', help='Ignore completion marker and redo')
     args = parser.parse_args()
     main(args)

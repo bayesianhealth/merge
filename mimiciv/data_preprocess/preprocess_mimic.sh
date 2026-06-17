@@ -1,88 +1,73 @@
 #!/usr/bin/env bash
-# Usage: bash data_preprocess/preprocess_mimic.sh \
-#            <mimic_iv_dir> <mimic_notes_dir> <mimic_cxr_jpg_dir> [gpu]
+# Usage: bash data_preprocess/preprocess_mimic.sh <notes_file_path> [gpu] [batch_size]
 #
-# mimic_iv_dir:      path to MIMIC-IV 3.1 root (contains hosp/ and icu/)
-# mimic_notes_dir:   path to MIMIC-IV-Note 2.2 note/ directory
-#                    (the directory that directly contains radiology.csv.gz)
-# mimic_cxr_jpg_dir: path to MIMIC-CXR-JPG 2.0.0 root
-# gpu:               GPU device ID for embedding steps (default: 0)
+# notes_file_path: path to radiology notes CSV (e.g. from stage)
+# gpu:            GPU device ID for embedding steps (default: 0)
+# batch_size:     Step 1 admissions-per-batch (default: 40000). Larger = faster
+#                 but more RAM. Tune to the instance you run Step 1 on.
 #
+# Data is read from Snowflake (MIMICIV database) via snowflake_utils.py.
 # All intermediate and final files are written to ./data/
 # Run from the mimiciv/ directory.
+#
+# Steps are individually resumable: each writes a completion marker and is
+# skipped on rerun (use --force on a step to redo it). This means you can run
+# the non-GPU steps on a high-memory instance, then switch to a GPU instance
+# and rerun this script -- finished steps are skipped automatically.
 
 set -e
 
-if [[ $# -lt 3 || "$1" == "-h" || "$1" == "--help" ]]; then
-    echo "Usage: bash data_preprocess/preprocess_mimic.sh <mimic_iv_dir> <mimic_notes_dir> <mimic_cxr_jpg_dir> [gpu]"
+if [[ $# -lt 1 || "$1" == "-h" || "$1" == "--help" ]]; then
+    echo "Usage: bash data_preprocess/preprocess_mimic.sh <notes_file_path> [gpu] [batch_size]"
     echo ""
-    echo "  mimic_iv_dir:      MIMIC-IV 3.1 root (contains hosp/ and icu/)"
-    echo "  mimic_notes_dir:   MIMIC-IV-Note 2.2 note/ dir (contains radiology.csv.gz)"
-    echo "  mimic_cxr_jpg_dir: MIMIC-CXR-JPG 2.0.0 root"
-    echo "  gpu:               GPU device ID (default: 0)"
+    echo "  notes_file_path: path to radiology notes CSV (e.g. from stage)"
+    echo "  gpu:             GPU device ID (default: 0)"
+    echo "  batch_size:      Step 1 admissions per batch (default: 40000)"
     exit 1
 fi
 
-MIMIC_IV_DIR=$1
-MIMIC_NOTES_DIR=$2
-MIMIC_CXR_JPG_DIR=$3
-GPU=${4:-0}
+NOTES_FILE_PATH=$1
+GPU=${2:-0}
+BATCH_SIZE=${3:-40000}
 OUTPUT_DIR=./data
 
-echo "=== Step 1/8: Irregular time series (labs + vitals) ==="
+echo "=== Step 1/6: Irregular time series (labs + vitals) [batch_size=$BATCH_SIZE] ==="
 python data_preprocess/preprocess_irg_time_series.py \
-    --mimic_iv_dir "$MIMIC_IV_DIR" \
-    --output_dir "$OUTPUT_DIR"
+    --output_dir "$OUTPUT_DIR" \
+    --batch_size "$BATCH_SIZE"
 
-echo "=== Step 2/8: Imputed regular time series ==="
+echo "=== Step 2/6: Imputed regular time series ==="
 python data_preprocess/preprocess_imputed_time_series.py \
     --output_dir "$OUTPUT_DIR"
 
-echo "=== Step 3/8: Radiology notes text ==="
+echo "=== Step 3/6: Radiology notes text ==="
 python data_preprocess/preprocess_notes.py \
-    --mimic_iv_dir "$MIMIC_IV_DIR" \
-    --mimic_iv_notes_dir "$MIMIC_NOTES_DIR" \
+    --notes_file_path "$NOTES_FILE_PATH" \
     --output_dir "$OUTPUT_DIR"
 
-echo "=== Step 4/8: BioBERT note embeddings (GPU-intensive) ==="
+echo "=== Step 4/6: BioBERT note embeddings (GPU-intensive) ==="
 python data_preprocess/preprocess_notes_embeddings.py \
     --output_dir "$OUTPUT_DIR" \
     --device_number "$GPU"
 
-echo "=== Step 5/8: CXR metadata ==="
-python data_preprocess/preprocess_cxr.py \
-    --mimic_cxr_jpg_dir "$MIMIC_CXR_JPG_DIR" \
-    --mimic_iv_dir "$MIMIC_IV_DIR" \
-    --output_dir "$OUTPUT_DIR"
-
-echo "=== Step 6/8: DenseNet121 CXR embeddings (GPU-intensive) ==="
-python data_preprocess/preprocess_cxr_embeddings.py \
-    --mimic_cxr_jpg_dir "$MIMIC_CXR_JPG_DIR" \
-    --output_dir "$OUTPUT_DIR" \
-    --device_number "$GPU"
-
-echo "=== Step 7/8: Create IHM task (train/val/test pkl files) ==="
+echo "=== Step 5/6: Create IHM task (train/val/test pkl files) ==="
 python data_preprocess/create_ihm_task.py \
-    --mimic_iv_dir "$MIMIC_IV_DIR" \
     --output_dir "$OUTPUT_DIR" \
     --restrict_hours 48 \
     --include_notes \
-    --include_cxr \
     --include_missing \
     --standardize_features \
     --seed 42
 
-echo "=== Step 8/8: Create LOS task (train/val/test pkl files) ==="
+echo "=== Step 6/6: Create LOS task (train/val/test pkl files) ==="
 python data_preprocess/create_los_task.py \
-    --mimic_iv_dir "$MIMIC_IV_DIR" \
     --output_dir "$OUTPUT_DIR" \
     --include_notes \
-    --include_cxr \
     --include_missing \
     --standardize_features \
     --seed 42
 
 echo ""
 echo "Preprocessing complete. Output files:"
-echo "  IHM: $OUTPUT_DIR/ihm/{train,val,test}_ihm-48-cxr-notes-missingInd-standardized_stays.pkl"
-echo "  LOS: $OUTPUT_DIR/los/{train,val,test}_los-cxr-notes-missingInd-standardized_stays.pkl"
+echo "  IHM: $OUTPUT_DIR/ihm/{train,val,test}_ihm-48-notes-missingInd-standardized_stays.pkl"
+echo "  LOS: $OUTPUT_DIR/los/{train,val,test}_los-notes-missingInd-standardized_stays.pkl"

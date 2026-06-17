@@ -32,7 +32,7 @@ except ImportError as e:
     sys.exit(1)
 
 
-DEFAULT_DATASET_DIR = "/cis/home/xhan56/pamap/PAMAP2_Dataset/Protocol"
+DEFAULT_DATASET_DIR = '@"TEST"."SILVER"."UDTF_FEATURE_STAGE"/Protocol'
 DEFAULT_OUTPUT_DIR = "./results/pamap_multimodal_training"
 DEFAULT_RUS_FILE_PATTERN = "./results/pamap/pamap_subject{SUBJECT_ID}_lag{MAX_LAG}_{METHOD}_discrim_epochs{DISCRIM_EPOCHS}_ce_epochs{CE_EPOCHS}_n_batches{N_BATCHES}_batch_size{BATCH_SIZE}_seed{SEED}.npy"
 

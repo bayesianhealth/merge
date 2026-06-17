@@ -17,13 +17,13 @@ GPU=$2
 
 python test_mimiciv_multimodal.py \
     --checkpoint_path $CHECKPOINT_PATH \
-    --test_data_path ./data/ihm/test_ihm-48-cxr-notes-missingInd-standardized_stays.pkl \
+    --test_data_path ./data/ihm/test_ihm-48-notes-missingInd-standardized_stays.pkl \
     --rus_data_path ./results/ihm/rus_multimodal_all_seq48_lags8_meanpool.npy \
     --gpu $GPU \
     --eval_train \
-    --train_data_path ./data/ihm/train_ihm-48-cxr-notes-missingInd-standardized_stays.pkl \
+    --train_data_path ./data/ihm/train_ihm-48-notes-missingInd-standardized_stays.pkl \
     --eval_val \
-    --val_data_path ./data/ihm/val_ihm-48-cxr-notes-missingInd-standardized_stays.pkl \
+    --val_data_path ./data/ihm/val_ihm-48-notes-missingInd-standardized_stays.pkl \
     --plot_expert_activations \
     --plot_num_samples 1024 \
     --save_metrics

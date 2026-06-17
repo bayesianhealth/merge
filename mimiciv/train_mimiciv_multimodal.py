@@ -537,7 +537,6 @@ def main(args):
         torch.cuda.manual_seed_all(args.seed)
 
     modality_dim_dict = {'labs_vitals': 30,
-                         'cxr': 1024,
                          'notes': 768}
     # Load data
     print(f"Loading train data from {args.train_data_path}...")
@@ -546,6 +545,13 @@ def main(args):
     print(f"Loading val data from {args.val_data_path}...")
     val_stays = pickle.load(open(args.val_data_path, 'rb'))
     val_multimodal_reg_ts, val_labels = preprocess_mimiciv_data(val_stays, modality_dim_dict)
+
+    # Derive modality feature dims from the actual data rather than hardcoding them.
+    # reg_ts is 31-dim (22 labs + 9 vitals); a stale hardcoded value crashed the
+    # encoder dim assertion (Expected 30, got 31).
+    for mod_name in modality_dim_dict:
+        modality_dim_dict[mod_name] = train_multimodal_reg_ts[0][mod_name][0].shape[1]
+    print(f"Modality dims (from data): {modality_dim_dict}")
 
     # Load RUS data
     modality_names = sorted(list(modality_dim_dict.keys()))

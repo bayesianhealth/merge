@@ -5,9 +5,18 @@ import numpy as np
 from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
 import pickle
+from snowflake_utils import get_connection, read_sql
+import pipeline_utils as pu
 
 
-def get_stay_list(stays, irg_labs_vitals_df, imputed_labs_vitals_df, notes_df, cxr_df, admissions_df, include_notes=False, include_cxr=False, use_raw_data=False):
+def _epoch_to_datetime(df, cols):
+    for col in cols:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], unit='s')
+    return df
+
+
+def get_stay_list(stays, irg_labs_vitals_df, imputed_labs_vitals_df, notes_df, admissions_df, include_notes=False, use_raw_data=False):
     stays_list = []
 
     for curr_stay in tqdm(stays, desc="Processing stays"):
@@ -68,29 +77,6 @@ def get_stay_list(stays, irg_labs_vitals_df, imputed_labs_vitals_df, notes_df, c
                         curr_stay_dict['text_embeddings'] = []
                     curr_stay_dict['text_missing'] = 0
 
-        if include_cxr:
-            if cxr_df is None:
-                curr_stay_dict['cxr_feats'] = []
-                curr_stay_dict['cxr_time'] = []
-                curr_stay_dict['cxr_missing'] = 1
-            else:
-                curr_stay_cxr = cxr_df[cxr_df['stay_id'] == curr_stay].copy()
-                
-                if len(curr_stay_cxr) == 0:
-                    curr_stay_dict['cxr_feats'] = []
-                    curr_stay_dict['cxr_time'] = []
-                    curr_stay_dict['cxr_missing'] = 1
-                else:
-                    curr_stay_dict['cxr_subject_ids'] = curr_stay_cxr['subject_id'].values
-                    curr_stay_dict['cxr_study_ids'] = curr_stay_cxr['study_id'].values
-                    curr_stay_dict['cxr_dicom_ids'] = curr_stay_cxr['dicom_id'].values
-                    if not use_raw_data:
-                        curr_stay_dict['cxr_feats'] = curr_stay_cxr['densefeatures'].tolist()
-                    else:
-                        curr_stay_dict['cxr_feats'] = []
-                    curr_stay_dict['cxr_time'] = curr_stay_cxr['icu_time_delta'].values
-                    curr_stay_dict['cxr_missing'] = 0
-
         curr_stay_dict['label'] = admissions_df[admissions_df['hadm_id'] == curr_stay_dict['hadm_id']]['died'].iloc[0]
 
         stays_list.append(curr_stay_dict)
@@ -99,12 +85,16 @@ def get_stay_list(stays, irg_labs_vitals_df, imputed_labs_vitals_df, notes_df, c
 
 
 def main(args):
+    if not args.force and pu.is_done(args.output_dir, pu.STEP5_IHM):
+        print("Step 5 (IHM) already complete (marker present); skipping. Use --force to redo.")
+        return
+    conn = get_connection()
+
     print("Starting IHM task creation...")
     print(f"Configuration:")
     print(f"  - Output directory: {args.output_dir}")
     print(f"  - Restrict hours: {args.restrict_hours}")
     print(f"  - Include notes: {args.include_notes}")
-    print(f"  - Include CXR: {args.include_cxr}")
     print(f"  - Include missing modalities: {args.include_missing}")
     print(f"  - Standardize features: {args.standardize_features}")
     print(f"  - Use raw data: {args.use_raw_data}")
@@ -128,9 +118,8 @@ def main(args):
         imputed_labs_vitals_df = imputed_labs_vitals_df[imputed_labs_vitals_df['icu_time_delta'] <= args.restrict_hours]
         print(f"  - After {args.restrict_hours}h restriction: {len(irg_labs_vitals_df)} irregular records, {len(imputed_labs_vitals_df)} imputed records")
 
-    # Initialize notes_df and cxr_df
+    # Initialize notes_df
     notes_df = None
-    cxr_df = None
 
     if args.include_notes:
         print("Loading radiology notes and text embeddings...")
@@ -143,19 +132,9 @@ def main(args):
             notes_df = notes_df[notes_df['icu_time_delta'] <= args.restrict_hours]
             print(f"  - After filtering: {len(notes_df)} note records")
 
-    if args.include_cxr:
-        print("Loading chest X-ray embeddings...")
-        cxr_df = pd.read_parquet(os.path.join(args.output_dir, "mimic_cxr_embeddings.parquet"))
-        cxr_df = cxr_df[cxr_df['icu_time_delta'] >= 0]
-        print(f"  - Loaded {len(cxr_df)} CXR records")
-        if args.restrict_hours is not None:
-            cxr_df = cxr_df[cxr_df['icu_time_delta'] <= args.restrict_hours]
-            print(f"  - After filtering: {len(cxr_df)} CXR records")
-
     print("Loading ICU stays data...")
-    icustays_df = pd.read_csv(os.path.join(args.mimic_iv_dir, "icu", "icustays.csv.gz"))
-    icustays_df['intime'] = pd.to_datetime(icustays_df['intime'])
-    icustays_df['outtime'] = pd.to_datetime(icustays_df['outtime'])
+    icustays_df = read_sql("SELECT * FROM MIMICIV.ICU.ICUSTAYS", conn)
+    icustays_df = _epoch_to_datetime(icustays_df, ['intime', 'outtime'])
     print(f"  - Loaded {len(icustays_df)} ICU stays")
 
     if args.restrict_hours is not None:
@@ -174,46 +153,30 @@ def main(args):
     if args.include_notes:
         if notes_df is not None:
             notes_df = notes_df[notes_df['stay_id'].isin(valid_stay_ids)]
-            if args.min_cxr_note_observation is not None:
-                # Count observations per stay_id
+            if args.min_note_observation is not None:
                 stay_counts = notes_df.groupby('stay_id').size()
-                # Get stay_ids that meet the minimum observation requirement
-                valid_stays_for_notes = stay_counts[stay_counts >= args.min_cxr_note_observation].index
-                # Filter notes_df to only include valid stay_ids
+                valid_stays_for_notes = stay_counts[stay_counts >= args.min_note_observation].index
                 notes_df = notes_df[notes_df['stay_id'].isin(valid_stays_for_notes)]
 
-    if args.include_cxr:
-        if cxr_df is not None:
-            cxr_df = cxr_df[cxr_df['stay_id'].isin(valid_stay_ids)]
-            if args.min_cxr_note_observation is not None:
-                # Count observations per stay_id
-                stay_counts = cxr_df.groupby('stay_id').size()
-                # Get stay_ids that meet the minimum observation requirement
-                valid_stays_for_cxr = stay_counts[stay_counts >= args.min_cxr_note_observation].index
-                # Filter cxr_df to only include valid stay_ids
-                cxr_df = cxr_df[cxr_df['stay_id'].isin(valid_stays_for_cxr)]
-
     print("Loading admissions data for mortality labels...")
-    admissions_df = pd.read_csv(os.path.join(args.mimic_iv_dir, "hosp", "admissions.csv.gz"))
+    admissions_df = read_sql("SELECT * FROM MIMICIV.HOSP.ADMISSIONS", conn)
     admissions_df = admissions_df.rename(columns={"hospital_expire_flag": "died"})
     admissions_df = admissions_df[["subject_id", "hadm_id", "died"]]
     print(f"  - Loaded {len(admissions_df)} admission records")
+
+    conn.close()
 
     print("Determining final set of stays based on modality requirements...")
     if not args.include_missing:
         unique_stays = irg_labs_vitals_df['stay_id'].unique()
         if args.include_notes and notes_df is not None:
             unique_stays = np.intersect1d(unique_stays, notes_df['stay_id'].unique())
-        if args.include_cxr and cxr_df is not None:
-            unique_stays = np.intersect1d(unique_stays, cxr_df['stay_id'].unique())
 
         print(f"Number of stays with all required modalities: {len(unique_stays)}")
     else:
         unique_stays = irg_labs_vitals_df['stay_id'].unique()
         if args.include_notes and notes_df is not None:
             unique_stays = np.union1d(unique_stays, notes_df['stay_id'].unique())
-        if args.include_cxr and cxr_df is not None:
-            unique_stays = np.union1d(unique_stays, cxr_df['stay_id'].unique())
 
         print(f"Number of stays with any available modality: {len(unique_stays)}")
 
@@ -248,7 +211,6 @@ def main(args):
         imputed_scaler = StandardScaler()
         imputed_scaler.fit(train_imputed_labs_vitals_df[numeric_cols])
         
-        # Apply scaling to all splits using training scaler
         print("  - Standardizing irregular time series features...")
         irg_labs_vitals_df[numeric_cols] = irg_scaler.transform(irg_labs_vitals_df[numeric_cols])
         print("  - Standardizing imputed time series features...")
@@ -258,11 +220,11 @@ def main(args):
     # Create stay lists for all splits
     print("Processing stays data for each split...")
     print("  - Processing training stays...")
-    train_stays_list = get_stay_list(train_stays, irg_labs_vitals_df, imputed_labs_vitals_df, notes_df, cxr_df, admissions_df, args.include_notes, args.include_cxr, args.use_raw_data)
+    train_stays_list = get_stay_list(train_stays, irg_labs_vitals_df, imputed_labs_vitals_df, notes_df, admissions_df, args.include_notes, args.use_raw_data)
     print("  - Processing validation stays...")
-    val_stays_list = get_stay_list(val_stays, irg_labs_vitals_df, imputed_labs_vitals_df, notes_df, cxr_df, admissions_df, args.include_notes, args.include_cxr, args.use_raw_data)
+    val_stays_list = get_stay_list(val_stays, irg_labs_vitals_df, imputed_labs_vitals_df, notes_df, admissions_df, args.include_notes, args.use_raw_data)
     print("  - Processing test stays...")
-    test_stays_list = get_stay_list(test_stays, irg_labs_vitals_df, imputed_labs_vitals_df, notes_df, cxr_df, admissions_df, args.include_notes, args.include_cxr, args.use_raw_data)
+    test_stays_list = get_stay_list(test_stays, irg_labs_vitals_df, imputed_labs_vitals_df, notes_df, admissions_df, args.include_notes, args.use_raw_data)
 
     # Save the data
     print("Generating output filename...")
@@ -272,19 +234,14 @@ def main(args):
     else:
         base_name += "-all"
 
-    if args.include_cxr:
-        if args.include_notes:
-            base_name += "-cxr-notes"
-        else:
-            base_name += "-cxr"
-    elif args.include_notes:
+    if args.include_notes:
         base_name += "-notes"
 
     if args.include_missing:
         base_name += "-missingInd"
 
-    if args.min_cxr_note_observation is not None:
-        base_name += f"-min{args.min_cxr_note_observation}cxrnotes"
+    if args.min_note_observation is not None:
+        base_name += f"-min{args.min_note_observation}notes"
 
     if args.standardize_features:
         base_name += "-standardized"
@@ -297,42 +254,33 @@ def main(args):
     print("Saving processed data...")
     task_dir = os.path.join(args.output_dir, "ihm")
     os.makedirs(task_dir, exist_ok=True)
-    # Save train data
-    f_path = os.path.join(task_dir, f"train_{base_name}_stays.pkl")
-    with open(f_path, 'wb') as f:
-        print(f"Saving train stays to {f_path}")
-        pickle.dump(train_stays_list, f)
+    train_path = os.path.join(task_dir, f"train_{base_name}_stays.pkl")
+    print(f"Saving train stays to {train_path}")
+    pu.atomic_pickle_dump(train_stays_list, train_path)
 
-    # Save validation data
-    f_path = os.path.join(task_dir, f"val_{base_name}_stays.pkl")
-    with open(f_path, 'wb') as f:
-        print(f"Saving val stays to {f_path}")
-        pickle.dump(val_stays_list, f)
+    val_path = os.path.join(task_dir, f"val_{base_name}_stays.pkl")
+    print(f"Saving val stays to {val_path}")
+    pu.atomic_pickle_dump(val_stays_list, val_path)
 
-    # Save test data
-    f_path = os.path.join(task_dir, f"test_{base_name}_stays.pkl")
-    with open(f_path, 'wb') as f:
-        print(f"Saving test stays to {f_path}")
-        pickle.dump(test_stays_list, f)
+    test_path = os.path.join(task_dir, f"test_{base_name}_stays.pkl")
+    print(f"Saving test stays to {test_path}")
+    pu.atomic_pickle_dump(test_stays_list, test_path)
 
-    # Save scalers if standardization was applied
     if args.standardize_features:
         print("Saving feature standardization scalers...")
-        scaler_path = os.path.join(task_dir, f"{base_name}_irg_scaler.pkl")
-        with open(scaler_path, 'wb') as f:
-            print(f"Saving irregular data scaler to {scaler_path}")
-            pickle.dump(irg_scaler, f)
-            
-        scaler_path = os.path.join(task_dir, f"{base_name}_imputed_scaler.pkl")
-        with open(scaler_path, 'wb') as f:
-            print(f"Saving imputed data scaler to {scaler_path}")
-            pickle.dump(imputed_scaler, f)
+        pu.atomic_pickle_dump(irg_scaler, os.path.join(task_dir, f"{base_name}_irg_scaler.pkl"))
+        pu.atomic_pickle_dump(imputed_scaler, os.path.join(task_dir, f"{base_name}_imputed_scaler.pkl"))
+
+    pu.write_marker(args.output_dir, pu.STEP5_IHM, {
+        "base_name": base_name,
+        "train": len(train_stays_list), "val": len(val_stays_list), "test": len(test_stays_list),
+        "outputs": [os.path.relpath(p, args.output_dir) for p in (train_path, val_path, test_path)],
+    })
 
     print()
     print("=" * 50)
     print("IHM TASK CREATION COMPLETE!")
     print("=" * 50)
-    print(f"Data saved successfully!")
     print(f"Train: {len(train_stays_list)} stays")
     print(f"Val: {len(val_stays_list)} stays") 
     print(f"Test: {len(test_stays_list)} stays")
@@ -342,19 +290,18 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mimic_iv_dir", type=str, required=True, help='Path to mimic-iv data directory (e.g. mimiciv/3.1/)')
     parser.add_argument("--output_dir", type=str, help='Path to output directory', default='data')
     parser.add_argument("--restrict_hours", type=int, choices=[24, 48], default=None, help='Restrict to specified hours of data (24 or 48). If not specified, use all available data.')
     parser.add_argument("--include_notes", action='store_true', help='Include notes in the task')
-    parser.add_argument("--include_cxr", action='store_true', help='Include chest X-rays in the task')
     parser.add_argument("--include_missing", action='store_true', help='Include stays with missing modalities')
-    parser.add_argument("--min_cxr_note_observation", type=int, default=None, help='Minimum number of observations of chest x-rays and clinical notes to include in the task')
+    parser.add_argument("--min_note_observation", type=int, default=None, help='Minimum number of note observations per stay to include')
     parser.add_argument("--standardize_features", action='store_true', help='Standardize features')
-    parser.add_argument("--use_raw_data", action='store_true', help='If true, not include embeddings for notes and CXR. For notes, use raw text. For CXR, use subject_id, study_id, and dicom_id to specify the image. If false, also include notes and CXR embeddings.')
+    parser.add_argument("--use_raw_data", action='store_true', help='If true, do not include embeddings for notes (use raw text instead).')
     parser.add_argument("--seed", type=int, default=42, help='Random seed')
+    parser.add_argument("--force", action='store_true', help='Ignore completion marker and redo')
     args = parser.parse_args()
-    if args.min_cxr_note_observation is not None:
-        assert args.min_cxr_note_observation > 0, "Minimum number of observations per modality must be greater than 0"
-        assert not args.include_missing, "Cannot include missing modalities if minimum number of observations per modality is specified"
+    if args.min_note_observation is not None:
+        assert args.min_note_observation > 0, "Minimum number of observations must be greater than 0"
+        assert not args.include_missing, "Cannot include missing modalities if minimum number of observations is specified"
     
     main(args)

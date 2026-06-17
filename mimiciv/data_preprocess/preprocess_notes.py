@@ -1,6 +1,18 @@
 import os
+import gzip
 import argparse
+import tempfile
 import pandas as pd
+from snowflake.snowpark import Session
+from snowflake_utils import get_connection, read_sql, get_snowpark_session
+import pipeline_utils as pu
+
+
+def _epoch_to_datetime(df, cols):
+    for col in cols:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], unit='s')
+    return df
 
 def add_time_delta_notes_vectorized(notes_df, admissions_df, icustays_df):
     """
@@ -75,33 +87,49 @@ def add_time_delta_notes_vectorized(notes_df, admissions_df, icustays_df):
 
 
 def main(args):
-    print('Loading radiology notes...')
-    rad_notes_df = pd.read_csv(os.path.join(args.mimic_iv_notes_dir, "radiology.csv.gz"))
+    if not args.force and pu.is_done(args.output_dir, pu.STEP3_NOTES):
+        print("Step 3 already complete (marker present); skipping. Use --force to redo.")
+        return
+
+    conn = get_connection()
+    session = get_snowpark_session(conn)
+
+    print('Downloading radiology notes from stage...')
+    stage_path = '@"TEST"."SILVER"."UDTF_FEATURE_STAGE"/radiology.csv.gz'
+    local_dir = tempfile.mkdtemp()
+    session.file.get(stage_path, local_dir)
+    local_gz_path = os.path.join(local_dir, "radiology.csv.gz")
+
+    print('Decompressing and loading radiology notes...')
+    with gzip.open(local_gz_path, 'rt') as f:
+        rad_notes_df = pd.read_csv(f)
     rad_notes_df['charttime'] = pd.to_datetime(rad_notes_df['charttime'])
     rad_notes_df['storetime'] = pd.to_datetime(rad_notes_df['storetime'])
 
     print('Loading icustays...')
-    icustays_df = pd.read_csv(os.path.join(args.mimic_iv_dir, "icu", "icustays.csv.gz"))
-    icustays_df['intime'] = pd.to_datetime(icustays_df['intime'])
-    icustays_df['outtime'] = pd.to_datetime(icustays_df['outtime'])
+    icustays_df = read_sql("SELECT * FROM MIMICIV.ICU.ICUSTAYS", conn)
+    icustays_df = _epoch_to_datetime(icustays_df, ['intime', 'outtime'])
 
     print('Loading admissions...')
-    admissions_df = pd.read_csv(os.path.join(args.mimic_iv_dir, "hosp", "admissions.csv.gz"))
-    admissions_df['admittime'] = pd.to_datetime(admissions_df['admittime'])
-    admissions_df['dischtime'] = pd.to_datetime(admissions_df['dischtime'])
+    admissions_df = read_sql("SELECT * FROM MIMICIV.HOSP.ADMISSIONS", conn)
+    admissions_df = _epoch_to_datetime(admissions_df, ['admittime', 'dischtime'])
+
+    conn.close()
 
     print('Adding time delta...')
     rad_notes_df = add_time_delta_notes_vectorized(rad_notes_df, admissions_df, icustays_df)
 
     print('Saving radiology notes...')
-    rad_notes_df.to_parquet(os.path.join(args.output_dir, "rad_notes_text.parquet"))
+    pu.atomic_to_parquet(rad_notes_df, os.path.join(args.output_dir, "rad_notes_text.parquet"))
+    pu.write_marker(args.output_dir, pu.STEP3_NOTES,
+                    {"rows": int(len(rad_notes_df)), "output": "rad_notes_text.parquet"})
 
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mimic_iv_dir", type=str, required=True, help='Path to mimic-iv data directory (e.g. mimiciv/3.1/)')
-    parser.add_argument("--mimic_iv_notes_dir", type=str, required=True, help='Path to mimic-iv notes directory (e.g. mimicivnote/2.2/note/)')
     parser.add_argument("--output_dir", type=str, help='Path to output directory', default='data')
+    parser.add_argument("--notes_file_path", type=str, default=None, help='Path to radiology notes CSV (informational)')
+    parser.add_argument("--force", action='store_true', help='Ignore completion marker and redo')
     args = parser.parse_args()
     main(args)

@@ -12,8 +12,9 @@ ce_epochs=20
 n_batches=1
 batch_size=512
 seed=42
-gpu=2
+gpu=0
 
+dataset_dir='@"TEST"."SILVER"."UDTF_FEATURE_STAGE"/Protocol'
 start_time=$(date +%s)
 
 # Compute per-subject RUS values for every subject in $subject_ids
@@ -33,7 +34,8 @@ python pamap_rus_multimodal.py \
     --embed_dim 20 \
     --batch_size $batch_size \
     --n_batches $n_batches \
-    --seed $seed
+    --seed $seed \
+    --dataset_dir "$dataset_dir"
 
 python train_pamap_multimodal.py \
     --train_subjects $train_subjects \

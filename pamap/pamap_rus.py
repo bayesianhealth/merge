@@ -45,9 +45,48 @@ def get_pamap_column_names():
             columns.append(col_name)
     return columns
 
+def _get_snowpark_session():
+    """Return an active Snowpark session, building one from the container-runtime
+    login token if there is no session already active (e.g. in a subprocess)."""
+    from snowflake.snowpark.context import get_active_session
+    try:
+        return get_active_session()
+    except Exception:
+        from snowflake.snowpark import Session
+        try:
+            return Session.builder.getOrCreate()
+        except Exception:
+            token_path = os.getenv("SNOWFLAKE_TOKEN_FILE_PATH", "/snowflake/session/token")
+            with open(token_path) as f:
+                token = f.read().strip()
+            params = {
+                "host": os.getenv("SNOWFLAKE_HOST"),
+                "account": os.getenv("SNOWFLAKE_ACCOUNT"),
+                "token": token,
+                "authenticator": "oauth",
+            }
+            return Session.builder.configs({k: v for k, v in params.items() if v}).create()
+
+
 def load_pamap_data(subject_id, data_dir):
-    """Loads data for a specific subject from the PAMAP2 dataset."""
-    file_path = os.path.join(data_dir, f"subject10{subject_id}.dat")
+    """Loads data for a specific subject from the PAMAP2 dataset.
+
+    Supports both a local filesystem directory and a Snowflake stage path
+    (e.g. '@"DB"."SCHEMA"."STAGE"/Protocol'). Stage paths are read through the
+    active Snowpark session since they are not OS filesystem paths.
+    """
+    file_name = f"subject10{subject_id}.dat"
+
+    if str(data_dir).lstrip().startswith('@'):
+        stage_path = f"{str(data_dir).rstrip('/')}/{file_name}"
+        print(f"Loading data for subject {subject_id} from stage {stage_path}...")
+        session = _get_snowpark_session()
+        with session.file.get_stream(stage_path) as f:
+            df = pd.read_csv(f, sep='\s+', header=None, names=get_pamap_column_names())
+        print(f"Loaded data shape: {df.shape}")
+        return df
+
+    file_path = os.path.join(data_dir, file_name)
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"Data file not found for subject {subject_id} at {file_path}")
 
