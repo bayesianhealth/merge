@@ -5,14 +5,13 @@ import argparse
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
-from snowflake_utils import get_connection, read_sql
+from databricks_utils import get_spark, read_sql, CATALOG
 import pipeline_utils as pu
 
 
 # Number of distinct admissions (hadm_id) processed per batch. Bounds peak
 # memory: the full filtered LABEVENTS table is ~43M rows, so we never load it
-# all at once. The per-batch HADM_ID filter is paged internally (see
-# IN_LIST_CHUNK) so this can exceed Snowflake's 16,384 IN-list limit.
+# all at once.
 BATCH_SIZE = 40000
 
 # Key columns carried through the time-series arrays (used for stable parquet
@@ -39,14 +38,7 @@ VITAL_RENAME_DICT = {
 }
 
 
-def _epoch_to_datetime(df, cols):
-    for col in cols:
-        if col in df.columns:
-            df[col] = pd.to_datetime(df[col], unit='s')
-    return df
-
-
-def _most_populated_itemid(conn, table, candidate_itemids):
+def _most_populated_itemid(spark, table, candidate_itemids):
     """Among itemids that share a D_*ITEMS label, return the one with the most rows
     in `table`.
 
@@ -60,40 +52,40 @@ def _most_populated_itemid(conn, table, candidate_itemids):
         return candidate_itemids[0]
     ids = ','.join(str(x) for x in candidate_itemids)
     counts = read_sql(
-        f"SELECT ITEMID, COUNT(*) AS N FROM {table} "
-        f"WHERE ITEMID IN ({ids}) GROUP BY ITEMID ORDER BY N DESC", conn)
+        f"SELECT itemid, COUNT(*) AS n FROM {table} "
+        f"WHERE itemid IN ({ids}) GROUP BY itemid ORDER BY n DESC", spark)
     if counts.empty:
         return candidate_itemids[0]
     return int(counts.iloc[0]['itemid'])
 
 
-def get_lab_event_mapping(conn):
+def get_lab_event_mapping(spark):
     """Return (event_id_df, d_lab_items_df). Small lookup only -- no event rows."""
-    d_lab_items_df = read_sql('SELECT "itemid", "label" FROM MIMICIV.HOSP.D_LABITEMS', conn)
+    d_lab_items_df = read_sql(f'SELECT itemid, label FROM {CATALOG}.hosp.d_labitems', spark)
     d_lab_items_df = d_lab_items_df.dropna()
 
     rows = []
     for event in dict.fromkeys(LAB_EVENT_LIST):  # dedupe labels, preserve order
         candidates = d_lab_items_df[d_lab_items_df['label'] == event]['itemid'].tolist()
         if not candidates:
-            raise ValueError(f"No itemid found in D_LABITEMS for lab '{event}'")
-        event_item_id = _most_populated_itemid(conn, 'MIMICIV.HOSP.LABEVENTS', candidates)
+            raise ValueError(f"No itemid found in d_labitems for lab '{event}'")
+        event_item_id = _most_populated_itemid(spark, f'{CATALOG}.hosp.labevents', candidates)
         rows.append({'itemid': event_item_id, 'event': event})
 
     event_id_df = pd.DataFrame(rows).drop_duplicates().reset_index(drop=True)
     return event_id_df, d_lab_items_df
 
 
-def get_vitals_event_mapping(conn):
+def get_vitals_event_mapping(spark):
     """Return (event_id_df, d_items_df). Small lookup only -- no event rows."""
-    d_items_df = read_sql('SELECT "itemid", "label" FROM MIMICIV.ICU.D_ITEMS', conn)
+    d_items_df = read_sql(f'SELECT itemid, label FROM {CATALOG}.icu.d_items', spark)
 
     rows = []
     for event in dict.fromkeys(VITAL_EVENT_LIST):  # dedupe labels, preserve order
         candidates = d_items_df[d_items_df['label'] == event]['itemid'].tolist()
         if not candidates:
-            raise ValueError(f"No itemid found in D_ITEMS for vital '{event}'")
-        event_item_id = _most_populated_itemid(conn, 'MIMICIV.ICU.CHARTEVENTS', candidates)
+            raise ValueError(f"No itemid found in d_items for vital '{event}'")
+        event_item_id = _most_populated_itemid(spark, f'{CATALOG}.icu.chartevents', candidates)
         rows.append({'itemid': event_item_id, 'event': event})
 
     event_id_df = pd.DataFrame(rows).drop_duplicates().reset_index(drop=True)
@@ -104,71 +96,59 @@ def _item_ids_str(event_id_df):
     return ','.join(str(int(x)) for x in event_id_df['itemid'].values)
 
 
-def get_distinct_hadm_ids(conn, table, item_ids):
+def get_distinct_hadm_ids(spark, table, item_ids):
     """Distinct hadm_ids (as a set of ints) for the given itemids in a table."""
     query = f"""
-        SELECT DISTINCT HADM_ID
+        SELECT DISTINCT hadm_id
         FROM {table}
-        WHERE ITEMID IN ({item_ids})
-          AND HADM_ID IS NOT NULL
+        WHERE itemid IN ({item_ids})
+          AND hadm_id IS NOT NULL
     """
-    df = read_sql(query, conn)
+    df = read_sql(query, spark)
     return set(int(x) for x in pd.to_numeric(df['hadm_id'], errors='coerce').dropna().unique())
 
 
-# Snowflake caps an IN-list at 16,384 expressions. We page the per-batch
-# HADM_ID filter into sub-queries of this size so batch_size is limited only by
-# available RAM, not by the SQL IN-list limit.
-IN_LIST_CHUNK = 10000
+def _fetch_events(spark, select_cols, table, item_ids, hadm_batch):
+    """Fetch events for a batch of hadm_ids. Spark has no IN-list size limit."""
+    ids = ','.join(str(h) for h in hadm_batch)
+    query = f"""
+        SELECT {select_cols}
+        FROM {table}
+        WHERE itemid IN ({item_ids})
+          AND hadm_id IN ({ids})
+    """
+    return read_sql(query, spark)
 
 
-def _fetch_events_paged(conn, select_cols, table, item_ids, hadm_batch):
-    """Run the SELECT once per <=IN_LIST_CHUNK slice of hadm_ids and concat raw rows."""
-    frames = []
-    for i in range(0, len(hadm_batch), IN_LIST_CHUNK):
-        ids = ','.join(str(h) for h in hadm_batch[i:i + IN_LIST_CHUNK])
-        query = f"""
-            SELECT {select_cols}
-            FROM {table}
-            WHERE ITEMID IN ({item_ids})
-              AND HADM_ID IN ({ids})
-        """
-        part = read_sql(query, conn)
-        if not part.empty:
-            frames.append(part)
-    if not frames:
-        return pd.DataFrame()
-    return pd.concat(frames, axis=0, ignore_index=True)
-
-
-def fetch_lab_batch(conn, item_ids, hadm_batch, event_id_df):
-    """Fetch + tag one hadm_id batch of LABEVENTS. Returns a DataFrame (may be empty)."""
-    df = _fetch_events_paged(
-        conn, "SUBJECT_ID, HADM_ID, ITEMID, CHARTTIME, STORETIME, VALUENUM, VALUEUOM",
-        "MIMICIV.HOSP.LABEVENTS", item_ids, hadm_batch)
+def fetch_lab_batch(spark, item_ids, hadm_batch, event_id_df):
+    """Fetch + tag one hadm_id batch of labevents. Returns a DataFrame (may be empty)."""
+    df = _fetch_events(
+        spark, "subject_id, hadm_id, itemid, charttime, storetime, valuenum, valueuom",
+        f"{CATALOG}.hosp.labevents", item_ids, hadm_batch)
     if df.empty:
         return df
-    # LABEVENTS.HADM_ID is VARCHAR; ADMISSIONS/ICUSTAYS use numeric hadm_id, so
-    # normalize to int to make merges (and the later concat with vitals) work.
     df['hadm_id'] = pd.to_numeric(df['hadm_id'], errors='coerce')
     df = df.dropna(subset=['hadm_id'])
     df['hadm_id'] = df['hadm_id'].astype('int64')
-    df = _epoch_to_datetime(df, ['charttime', 'storetime'])
+    # Databricks stores timestamps natively — no epoch conversion needed
+    df['charttime'] = pd.to_datetime(df['charttime'])
+    df['storetime'] = pd.to_datetime(df['storetime'])
     df = df.merge(event_id_df, on='itemid', how='left')
     return df
 
 
-def fetch_vitals_batch(conn, item_ids, hadm_batch, event_id_df):
-    """Fetch + tag one hadm_id batch of CHARTEVENTS. Returns a DataFrame (may be empty)."""
-    df = _fetch_events_paged(
-        conn, "SUBJECT_ID, HADM_ID, STAY_ID, ITEMID, CHARTTIME, STORETIME, VALUENUM, VALUEUOM",
-        "MIMICIV.ICU.CHARTEVENTS", item_ids, hadm_batch)
+def fetch_vitals_batch(spark, item_ids, hadm_batch, event_id_df):
+    """Fetch + tag one hadm_id batch of chartevents. Returns a DataFrame (may be empty)."""
+    df = _fetch_events(
+        spark, "subject_id, hadm_id, stay_id, itemid, charttime, storetime, valuenum, valueuom",
+        f"{CATALOG}.icu.chartevents", item_ids, hadm_batch)
     if df.empty:
         return df
     df['hadm_id'] = pd.to_numeric(df['hadm_id'], errors='coerce')
     df = df.dropna(subset=['hadm_id'])
     df['hadm_id'] = df['hadm_id'].astype('int64')
-    df = _epoch_to_datetime(df, ['charttime', 'storetime'])
+    df['charttime'] = pd.to_datetime(df['charttime'])
+    df['storetime'] = pd.to_datetime(df['storetime'])
     df = df.merge(event_id_df, on='itemid', how='left')
     df['event'] = df['event'].replace(VITAL_RENAME_DICT)
     return df
@@ -337,7 +317,7 @@ def _mark_completed(parts_dir, completed_set, idx):
     pu._atomic_write(os.path.join(parts_dir, "completed.txt"), data)
 
 
-def _load_or_build_plan(conn, parts_dir, lab_item_ids, vit_item_ids, batch_size):
+def _load_or_build_plan(spark, parts_dir, lab_item_ids, vit_item_ids, batch_size):
     plan_path = os.path.join(parts_dir, "plan.json")
     if os.path.exists(plan_path):
         with open(plan_path) as f:
@@ -349,8 +329,8 @@ def _load_or_build_plan(conn, parts_dir, lab_item_ids, vit_item_ids, batch_size)
         _reset_parts(parts_dir)
 
     print('Collecting distinct hadm_ids...')
-    lab_hadm = get_distinct_hadm_ids(conn, 'MIMICIV.HOSP.LABEVENTS', lab_item_ids)
-    vit_hadm = get_distinct_hadm_ids(conn, 'MIMICIV.ICU.CHARTEVENTS', vit_item_ids)
+    lab_hadm = get_distinct_hadm_ids(spark, f'{CATALOG}.hosp.labevents', lab_item_ids)
+    vit_hadm = get_distinct_hadm_ids(spark, f'{CATALOG}.icu.chartevents', vit_item_ids)
     all_hadm = sorted(lab_hadm | vit_hadm)
     batches = [all_hadm[i:i + batch_size] for i in range(0, len(all_hadm), batch_size)]
     plan = {"batch_size": batch_size, "n_hadm": len(all_hadm), "batches": batches}
@@ -405,20 +385,22 @@ def main(args):
         pu.clear_marker(out, pu.STEP1_IRG)
     os.makedirs(parts_dir, exist_ok=True)
 
-    conn = get_connection()
+    spark = get_spark()
 
     # small reference tables, kept in memory for the per-batch time-delta joins
     print('Loading admissions table...')
-    admissions_df = read_sql("SELECT * FROM MIMICIV.HOSP.ADMISSIONS", conn)
-    admissions_df = _epoch_to_datetime(admissions_df, ['admittime', 'dischtime'])
+    admissions_df = read_sql(f"SELECT * FROM {CATALOG}.hosp.admissions", spark)
+    admissions_df['admittime'] = pd.to_datetime(admissions_df['admittime'])
+    admissions_df['dischtime'] = pd.to_datetime(admissions_df['dischtime'])
 
     print('Loading icustays table...')
-    icustays_df = read_sql("SELECT * FROM MIMICIV.ICU.ICUSTAYS", conn)
-    icustays_df = _epoch_to_datetime(icustays_df, ['intime', 'outtime'])
+    icustays_df = read_sql(f"SELECT * FROM {CATALOG}.icu.icustays", spark)
+    icustays_df['intime'] = pd.to_datetime(icustays_df['intime'])
+    icustays_df['outtime'] = pd.to_datetime(icustays_df['outtime'])
 
     print('Building lab/vitals event mappings...')
-    lab_map_df, _ = get_lab_event_mapping(conn)
-    vit_map_df, _ = get_vitals_event_mapping(conn)
+    lab_map_df, _ = get_lab_event_mapping(spark)
+    vit_map_df, _ = get_vitals_event_mapping(spark)
     lab_item_ids = _item_ids_str(lab_map_df)
     vit_item_ids = _item_ids_str(vit_map_df)
 
@@ -427,7 +409,7 @@ def main(args):
     vit_event_cols = sorted(set(pd.Series(vit_map_df['event'].unique()).replace(VITAL_RENAME_DICT)))
     concat_event_cols = sorted(set(lab_event_cols) | set(vit_event_cols))
 
-    plan = _load_or_build_plan(conn, parts_dir, lab_item_ids, vit_item_ids, args.batch_size)
+    plan = _load_or_build_plan(spark, parts_dir, lab_item_ids, vit_item_ids, args.batch_size)
     batches = plan["batches"]
     n_batches = len(batches)
     completed = _load_completed(parts_dir)
@@ -440,7 +422,7 @@ def main(args):
         print(f'Batch {idx + 1}/{n_batches} ({len(batch)} admissions)...')
         bname = f"b{idx:05d}.parquet"
 
-        labs_b = fetch_lab_batch(conn, lab_item_ids, batch, lab_map_df)
+        labs_b = fetch_lab_batch(spark, lab_item_ids, batch, lab_map_df)
         if not labs_b.empty:
             labs_b = add_time_delta_vectorized(labs_b, admissions_df, icustays_df)
             _atomic_parquet(_finalize_ts(convert_events_table_to_ts_array(labs_b), lab_event_cols),
@@ -448,7 +430,7 @@ def main(args):
             _atomic_parquet(create_event_uom_map(labs_b),
                             os.path.join(parts_dir, "uom_labs_icu", bname))
 
-        vitals_b = fetch_vitals_batch(conn, vit_item_ids, batch, vit_map_df)
+        vitals_b = fetch_vitals_batch(spark, vit_item_ids, batch, vit_map_df)
         if not vitals_b.empty:
             vitals_b = add_time_delta_vectorized(vitals_b, admissions_df, icustays_df)
             _atomic_parquet(_finalize_ts(convert_events_table_to_ts_array(vitals_b), vit_event_cols),
@@ -468,8 +450,6 @@ def main(args):
 
         # record progress only after all of this batch's parts are durably written
         _mark_completed(parts_dir, completed, idx)
-
-    conn.close()
 
     print('All batches done; combining part files into final outputs...')
     _combine_ts(parts_dir, "ts_labs_icu", TS_KEYS + lab_event_cols, os.path.join(out, "ts_labs_icu.parquet"))

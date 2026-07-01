@@ -1,15 +1,3 @@
-"""
-Shared helpers for the MIMIC-IV preprocessing pipeline:
-
-- Atomic completion markers so a step is only considered "done" after it fully
-  succeeds. This prevents partial / interrupted outputs from being mistaken for
-  complete data on a rerun.
-- Atomic file writers (write-to-temp + os.replace) so an interrupted write never
-  leaves a half-written / 0-byte output behind.
-
-Markers live in <output_dir>/.markers/<step>.json and store metadata (timestamp,
-row/id counts) for inspection by check_pipeline.py.
-"""
 import os
 import json
 import time

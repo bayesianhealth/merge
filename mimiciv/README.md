@@ -13,10 +13,29 @@ All scripts are designed to be run from the `mimiciv/` directory.
 
 ## Prerequisites
 
-**Data access** (requires credentialed PhysioNet access):
-- [MIMIC-IV v3.1](https://physionet.org/content/mimiciv/3.1/) — `hosp/` and `icu/` tables
-- [MIMIC-IV-Note v2.2](https://physionet.org/content/mimic-iv-note/2.2/) — radiology notes (`note/radiology.csv.gz`)
-- [MIMIC-CXR-JPG v2.0.0](https://physionet.org/content/mimic-cxr-jpg/2.0.0/) — chest X-ray images and metadata
+**Databricks environment:**
+- A Databricks workspace with Unity Catalog enabled
+- MIMIC-IV tables loaded into a Unity Catalog catalog (default: `mimiciv`) with schemas `hosp` and `icu`
+- Radiology notes CSV stored in a UC Volume (e.g. `/Volumes/mimiciv/note/data/radiology.csv.gz`)
+- BioBERT model files either in a UC Volume or downloadable from HuggingFace Hub (`dmis-lab/biobert-v1.1`)
+- A GPU-enabled cluster for embedding steps (Steps 4 and 6)
+
+**Expected Unity Catalog layout:**
+```
+mimiciv.hosp.admissions
+mimiciv.hosp.labevents
+mimiciv.hosp.d_labitems
+mimiciv.icu.icustays
+mimiciv.icu.chartevents
+mimiciv.icu.d_items
+```
+
+**UC Volume for files** (path format: `/Volumes/<catalog>/<schema>/<volume>/<file>`):
+```
+/Volumes/mimiciv/note/data/radiology.csv.gz
+```
+
+Override the catalog name via the `MIMICIV_CATALOG` environment variable if your layout differs.
 
 ---
 
@@ -27,21 +46,19 @@ train/val/test pkl files for both tasks.
 
 ```bash
 bash data_preprocess/preprocess_mimic.sh \
-    /path/to/mimiciv/3.1/ \
-    /path/to/mimic-iv-note/2.2/note/ \
-    /path/to/mimic-cxr-jpg/2.0.0/ \
-    <gpu>
+    /Volumes/mimiciv/note/data/radiology.csv.gz \
+    <gpu> \
+    [batch_size]
 ```
 
 **Arguments:**
 | Argument | Description |
 |---|---|
-| `mimic_iv_dir` | MIMIC-IV 3.1 root directory (contains `hosp/` and `icu/`) |
-| `mimic_notes_dir` | The `note/` subdirectory of MIMIC-IV-Note 2.2 (directly contains `radiology.csv.gz`) |
-| `mimic_cxr_jpg_dir` | MIMIC-CXR-JPG 2.0.0 root directory |
+| `notes_file_path` | Path to radiology notes CSV (UC Volume path, e.g. `/Volumes/mimiciv/note/data/radiology.csv.gz`) |
 | `gpu` | GPU device ID for the embedding steps (default: `0`) |
+| `batch_size` | Admissions per batch for Step 1 (default: `40000`) |
 
-The pipeline runs 8 steps in sequence:
+The pipeline runs 6 steps in sequence:
 
 | Step | Script | Output |
 |---|---|---|
@@ -49,12 +66,10 @@ The pipeline runs 8 steps in sequence:
 | 2 | `preprocess_imputed_time_series.py` | `data/imputed_ts_labs_vitals.parquet` |
 | 3 | `preprocess_notes.py` | `data/rad_notes_text.parquet` |
 | 4 | `preprocess_notes_embeddings.py` *(GPU)* | `data/rad_notes_text_embeddings.parquet` |
-| 5 | `preprocess_cxr.py` | `data/cxr_metadata_with_time_delta.parquet` |
-| 6 | `preprocess_cxr_embeddings.py` *(GPU)* | `data/mimic_cxr_embeddings.parquet` |
-| 7 | `create_ihm_task.py` | `data/ihm/{train,val,test}_ihm-48-cxr-notes-missingInd-standardized_stays.pkl` |
-| 8 | `create_los_task.py` | `data/los/{train,val,test}_los-cxr-notes-missingInd-standardized_stays.pkl` |
+| 5 | `create_ihm_task.py` | `data/ihm/{train,val,test}_ihm-48-notes-missingInd-standardized_stays.pkl` |
+| 6 | `create_los_task.py` | `data/los/{train,val,test}_los-notes-missingInd-standardized_stays.pkl` |
 
-Steps 4 and 6 are GPU-intensive (BioBERT and DenseNet121 inference).
+Steps 4 is GPU-intensive (BioBERT inference).
 
 
 ---

@@ -1,20 +1,3 @@
-"""
-Inspect the state of the MIMIC-IV preprocessing pipeline.
-
-For each step it reports:
-  - completion marker present? (the authoritative "fully done" signal)
-  - each expected output: exists / readable / row count / distinct id counts
-  - Step 1 batch progress (from _step1_parts/) if a run is mid-flight
-
-This lets you see exactly what a prior (possibly interrupted) run produced,
-without trusting file existence alone -- 0-byte / footer-less files are flagged
-as INVALID rather than counted as done.
-
-Usage:
-  python data_preprocess/check_pipeline.py [--output_dir data]
-  python data_preprocess/check_pipeline.py --bless step1_irg   # mark a verified step done
-  python data_preprocess/check_pipeline.py --no-pkl-load       # skip loading large pkl files
-"""
 import os
 import glob
 import json

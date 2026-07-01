@@ -132,7 +132,7 @@ class MultimodalTemporalRUSMoELayer(nn.Module):
             embedding_dim=d_model,
             num_experts=num_experts,
             **router_config
-        )
+   )
         
     def forward(self, modality_features: List[torch.Tensor], rus_values: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, Dict]:
         """
@@ -434,3 +434,18 @@ class MultimodalTRUSMoEModel(nn.Module):
             outputs['encoded_modalities'] = encoded_modalities
         
         return final_logits, all_aux_outputs
+
+    @staticmethod
+    def fsdp_auto_wrap_policy():
+        """Return an FSDP auto-wrap policy for this model.
+
+        Wraps at the granularity of ModalitySpecificEncoder,
+        MultimodalTRUSMoEBlock, and TransformerBlock so each becomes its
+        own FSDP unit (parameters sharded independently).
+        """
+        from torch.distributed.fsdp.wrap import ModuleWrapPolicy
+        return ModuleWrapPolicy({
+            ModalitySpecificEncoder,
+            MultimodalTRUSMoEBlock,
+            TransformerBlock,
+        })

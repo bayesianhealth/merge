@@ -1,17 +1,3 @@
-"""
-This script computes the RUS of the time series of a stay in MIMIC-IV
-Example usage for in-hospital mortality:
-1. Linear interpolation + timestep pooling (no pooling)
-python mimiciv_rus_multimodal.py --train_dataset_path /path/to/train_ihm-48-cxr-notes-missingInd-standardized_stays.pkl --task ihm --linear_interpolation --seq_len 48 --num_lags 6
-
-2. Mean pooling
-python mimiciv_rus_multimodal.py --train_dataset_path /path/to/train_ihm-48-cxr-notes-missingInd-standardized_stays.pkl --task ihm --sequence_pooling mean --seq_len 48 --num_lags 6
-
-Example usage for length of stay:
-python mimiciv_rus_multimodal.py --train_dataset_path /path/to/train_los-cxr-notes-missingInd-standardized_stays.pkl --task los --linear_interpolation --seq_len 48 --num_lags 6
-python mimiciv_rus_multimodal.py --train_dataset_path /path/to/train_los-cxr-notes-missingInd-standardized_stays.pkl --task los --sequence_pooling mean --seq_len 48 --num_lags 6
-"""
-
 import os
 import sys
 
