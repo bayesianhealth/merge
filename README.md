@@ -8,7 +8,6 @@ You can install them using:
 pip install -r requirements.txt
 ```
 
-
 ## Datasets
 Here we use the PAMAP2 dataset as an example. You can download the dataset from [here](https://archive.ics.uci.edu/dataset/231/pamap2+physical+activity+monitoring).
 
