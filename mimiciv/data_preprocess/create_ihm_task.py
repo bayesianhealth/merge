@@ -5,15 +5,8 @@ import numpy as np
 from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
 import pickle
-from snowflake_utils import get_connection, read_sql
+from databricks_utils import get_spark, read_sql, CATALOG
 import pipeline_utils as pu
-
-
-def _epoch_to_datetime(df, cols):
-    for col in cols:
-        if col in df.columns:
-            df[col] = pd.to_datetime(df[col], unit='s')
-    return df
 
 
 def get_stay_list(stays, irg_labs_vitals_df, imputed_labs_vitals_df, notes_df, admissions_df, include_notes=False, use_raw_data=False):
@@ -88,7 +81,7 @@ def main(args):
     if not args.force and pu.is_done(args.output_dir, pu.STEP5_IHM):
         print("Step 5 (IHM) already complete (marker present); skipping. Use --force to redo.")
         return
-    conn = get_connection()
+    spark = get_spark()
 
     print("Starting IHM task creation...")
     print(f"Configuration:")
@@ -133,8 +126,9 @@ def main(args):
             print(f"  - After filtering: {len(notes_df)} note records")
 
     print("Loading ICU stays data...")
-    icustays_df = read_sql("SELECT * FROM MIMICIV.ICU.ICUSTAYS", conn)
-    icustays_df = _epoch_to_datetime(icustays_df, ['intime', 'outtime'])
+    icustays_df = read_sql(f"SELECT * FROM {CATALOG}.icu.icustays", spark)
+    icustays_df['intime'] = pd.to_datetime(icustays_df['intime'])
+    icustays_df['outtime'] = pd.to_datetime(icustays_df['outtime'])
     print(f"  - Loaded {len(icustays_df)} ICU stays")
 
     if args.restrict_hours is not None:
@@ -159,12 +153,10 @@ def main(args):
                 notes_df = notes_df[notes_df['stay_id'].isin(valid_stays_for_notes)]
 
     print("Loading admissions data for mortality labels...")
-    admissions_df = read_sql("SELECT * FROM MIMICIV.HOSP.ADMISSIONS", conn)
+    admissions_df = read_sql(f"SELECT * FROM {CATALOG}.hosp.admissions", spark)
     admissions_df = admissions_df.rename(columns={"hospital_expire_flag": "died"})
     admissions_df = admissions_df[["subject_id", "hadm_id", "died"]]
     print(f"  - Loaded {len(admissions_df)} admission records")
-
-    conn.close()
 
     print("Determining final set of stays based on modality requirements...")
     if not args.include_missing:

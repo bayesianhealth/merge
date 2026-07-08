@@ -5,14 +5,8 @@ import numpy as np
 from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
 import pickle
-from snowflake_utils import get_connection, read_sql
-
-
-def _epoch_to_datetime(df, cols):
-    for col in cols:
-        if col in df.columns:
-            df[col] = pd.to_datetime(df[col], unit='s')
-    return df
+from databricks_utils import get_spark, read_sql, CATALOG
+import pipeline_utils as pu
 
 
 def get_stay_list(stays, irg_labs_vitals_df, imputed_labs_vitals_df, notes_df, admissions_df, icustays_df, include_notes=False):
@@ -93,7 +87,7 @@ def main(args):
     if not args.force and pu.is_done(args.output_dir, pu.STEP6_LOS):
         print("Step 6 (LOS) already complete (marker present); skipping. Use --force to redo.")
         return
-    conn = get_connection()
+    spark = get_spark()
 
     print("Starting length of stay (LOS) task creation...")
     print(f"Configuration:")
@@ -123,8 +117,9 @@ def main(args):
         print(f"  - Loaded {len(notes_df)} note records")
 
     print("Loading ICU stays data...")
-    icustays_df = read_sql("SELECT * FROM MIMICIV.ICU.ICUSTAYS", conn)
-    icustays_df = _epoch_to_datetime(icustays_df, ['intime', 'outtime'])
+    icustays_df = read_sql(f"SELECT * FROM {CATALOG}.icu.icustays", spark)
+    icustays_df['intime'] = pd.to_datetime(icustays_df['intime'])
+    icustays_df['outtime'] = pd.to_datetime(icustays_df['outtime'])
     icustays_df = icustays_df[icustays_df['los'] >= 2]
     print(f"  - Loaded {len(icustays_df)} ICU stays")
 
@@ -138,11 +133,9 @@ def main(args):
     if args.include_notes:
         notes_df = notes_df[notes_df['stay_id'].isin(valid_stay_ids)]
     
-    admissions_df = read_sql("SELECT * FROM MIMICIV.HOSP.ADMISSIONS", conn)
+    admissions_df = read_sql(f"SELECT * FROM {CATALOG}.hosp.admissions", spark)
     admissions_df = admissions_df.rename(columns={"hospital_expire_flag": "died"})
     admissions_df = admissions_df[["subject_id", "hadm_id", "died"]]
-
-    conn.close()
 
     if not args.include_missing:
         unique_stays = irg_labs_vitals_df['stay_id'].unique()
@@ -220,29 +213,26 @@ def main(args):
     task_dir = os.path.join(args.output_dir, "los")
     os.makedirs(task_dir, exist_ok=True)
     f_path = os.path.join(task_dir, f"train_{base_name}_stays.pkl")
-    with open(f_path, 'wb') as f:
-        print(f"Saving train stays to {f_path}")
-        pickle.dump(train_stays_list, f)
+    print(f"Saving train stays to {f_path}")
+    pu.atomic_pickle_dump(train_stays_list, f_path)
 
     f_path = os.path.join(task_dir, f"val_{base_name}_stays.pkl")
-    with open(f_path, 'wb') as f:
-        print(f"Saving val stays to {f_path}")
-        pickle.dump(val_stays_list, f)
+    print(f"Saving val stays to {f_path}")
+    pu.atomic_pickle_dump(val_stays_list, f_path)
 
     f_path = os.path.join(task_dir, f"test_{base_name}_stays.pkl")
-    with open(f_path, 'wb') as f:
-        print(f"Saving test stays to {f_path}")
-        pickle.dump(test_stays_list, f)
+    print(f"Saving test stays to {f_path}")
+    pu.atomic_pickle_dump(test_stays_list, f_path)
 
     if args.standardize_features:
         print("Saving feature standardization scalers...")
-        scaler_path = os.path.join(task_dir, f"{base_name}_irg_scaler.pkl")
-        with open(scaler_path, 'wb') as f:
-            pickle.dump(irg_scaler, f)
-            
-        scaler_path = os.path.join(task_dir, f"{base_name}_imputed_scaler.pkl")
-        with open(scaler_path, 'wb') as f:
-            pickle.dump(imputed_scaler, f)
+        pu.atomic_pickle_dump(irg_scaler, os.path.join(task_dir, f"{base_name}_irg_scaler.pkl"))
+        pu.atomic_pickle_dump(imputed_scaler, os.path.join(task_dir, f"{base_name}_imputed_scaler.pkl"))
+
+    pu.write_marker(args.output_dir, pu.STEP6_LOS, {
+        "base_name": base_name,
+        "train": len(train_stays_list), "val": len(val_stays_list), "test": len(test_stays_list),
+    })
 
     print()
     print("=" * 50)

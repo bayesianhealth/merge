@@ -1,26 +1,22 @@
 import os
 import argparse
-import tempfile
 import pandas as pd
 from tqdm import tqdm
 import torch
 from transformers import AutoTokenizer, AutoModel
-from snowflake.snowpark import Session
-from snowflake_utils import get_snowpark_session
 import pipeline_utils as pu
-
 
 
 # Copied from HAIM's repo: https://github.com/lrsoenksen/HAIM/blob/main/MIMIC_IV_HAIM_API.py
 def split_note_document(text, biobert_tokenizer, min_length = 15):
     # Inputs:
-    #   text -> String of text to be processed into an embedding. BioBERT can only process a string with â‰¤ 512 tokens. If the 
+    #   text -> String of text to be processed into an embedding. BioBERT can only process a string with ≤ 512 tokens. If the 
     #           input text exceeds this token count, we split it based on line breaks (driven from the discharge summary syntax). 
     #   min_length ->  When parsing the text into its subsections, remove text strings below a minimum length. These are generally 
     #                  very short and encode minimal information (e.g. 'Name: ___'). 
     #
     # Outputs:
-    #   chunk_parse -> A list of "chunks", i.e. text strings, that breaks up the original text into strings with â‰¤ 512 tokens
+    #   chunk_parse -> A list of "chunks", i.e. text strings, that breaks up the original text into strings with ≤ 512 tokens
     #   chunk_length -> A list of the token counts for each "chunk"
   
     # %% EXAMPLE OF USE
@@ -165,40 +161,20 @@ def process_notes_embeddings_batched(df, biobert_tokenizer, biobert_model, devic
     
     return result_df
 
-def download_model_from_stage(session, stage_path, local_dir):
-    """Download BioBERT model files from a Snowflake stage to a local directory."""
-    print(f"Downloading model files from {stage_path} to {local_dir}...")
-    session.sql('USE SCHEMA "TEST"."SILVER"').collect()
-    results = session.sql(f"LIST {stage_path}").collect()
-    for row in results:
-        file_path = row['name']
-        # Extract the filename relative to the stage prefix
-        # LIST returns paths like: <stage_name>/biobert-v1.1/<filename>
-        filename = os.path.basename(file_path)
-        local_file = os.path.join(local_dir, filename)
-        session.file.get(f"@{file_path}", local_dir)
-        print(f"  Downloaded: {filename}")
-    print(f"Model files downloaded to {local_dir}")
-
 
 def main(args):
     if not args.force and pu.is_done(args.output_dir, pu.STEP4_NOTES_EMB):
         print("Step 4 already complete (marker present); skipping. Use --force to redo.")
         return
 
-    session = get_snowpark_session()
-
     rad_notes_df = pd.read_parquet(os.path.join(args.output_dir, "rad_notes_text.parquet"))
     icu_rad_notes_df = rad_notes_df[rad_notes_df['stay_id'].notna()]
 
-    # Download BioBERT model from Snowflake stage to a local temp directory
-    local_model_dir = os.path.join(tempfile.gettempdir(), "biobert-v1.1")
-    os.makedirs(local_model_dir, exist_ok=True)
-    stage_path = '@"TEST"."SILVER"."UDTF_FEATURE_STAGE"/biobert-v1.1/'
-    download_model_from_stage(session, stage_path, local_model_dir)
-
-    biobert_tokenizer = AutoTokenizer.from_pretrained(local_model_dir)
-    biobert_model = AutoModel.from_pretrained(local_model_dir)
+    # Load BioBERT model from UC Volume (or local/HuggingFace Hub path)
+    model_path = args.model_path
+    print(f"Loading BioBERT model from {model_path}...")
+    biobert_tokenizer = AutoTokenizer.from_pretrained(model_path)
+    biobert_model = AutoModel.from_pretrained(model_path)
     device = f'cuda:{args.device_number}' if args.device_number is not None else 'cpu'
     icu_rad_notes_df = process_notes_embeddings_batched(icu_rad_notes_df, biobert_tokenizer, biobert_model, device, args.chunk_batch_size)
     pu.atomic_to_parquet(icu_rad_notes_df, os.path.join(args.output_dir, "rad_notes_text_embeddings.parquet"))
@@ -208,6 +184,8 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--output_dir", type=str, help='Path to output directory', default='data')
+    parser.add_argument("--model_path", type=str, default="dmis-lab/biobert-v1.1",
+                        help='Path to BioBERT model (UC Volume path, local dir, or HuggingFace Hub ID)')
     parser.add_argument("--chunk_batch_size", type=int, help='Chunk batch size', default=16)
     parser.add_argument("--device_number", type=int, help='Device number', default=None)
     parser.add_argument("--force", action='store_true', help='Ignore completion marker and redo')

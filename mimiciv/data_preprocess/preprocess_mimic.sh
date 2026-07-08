@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # Usage: bash data_preprocess/preprocess_mimic.sh <notes_file_path> [gpu] [batch_size]
 #
-# notes_file_path: path to radiology notes CSV (e.g. from stage)
+# notes_file_path: path to radiology notes CSV
+#                  (e.g. /Volumes/mimiciv/note/radiology.csv.gz)
 # gpu:            GPU device ID for embedding steps (default: 0)
 # batch_size:     Step 1 admissions-per-batch (default: 40000). Larger = faster
 #                 but more RAM. Tune to the instance you run Step 1 on.
 #
-# Data is read from Snowflake (MIMICIV database) via snowflake_utils.py.
+# Data is read from Unity Catalog (mimiciv catalog) via databricks_utils.py.
+# Override the catalog name with the MIMICIV_CATALOG env var if needed.
 # All intermediate and final files are written to ./data/
 # Run from the mimiciv/ directory.
 #
@@ -20,7 +22,7 @@ set -e
 if [[ $# -lt 1 || "$1" == "-h" || "$1" == "--help" ]]; then
     echo "Usage: bash data_preprocess/preprocess_mimic.sh <notes_file_path> [gpu] [batch_size]"
     echo ""
-    echo "  notes_file_path: path to radiology notes CSV (e.g. from stage)"
+    echo "  notes_file_path: path to radiology notes CSV (e.g. /Volumes/mimiciv/note/radiology.csv.gz)"
     echo "  gpu:             GPU device ID (default: 0)"
     echo "  batch_size:      Step 1 admissions per batch (default: 40000)"
     exit 1
